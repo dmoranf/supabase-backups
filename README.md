@@ -1,240 +1,254 @@
-# Supabase Backups
-Sistema multi‑proyecto de copias de seguridad para Supabase (DB + Storage)
+# Supabase Backups (Database + Storage S3)
 
-Este repositorio proporciona un **sistema completo y funcional** para realizar copias de seguridad de proyectos **Supabase** desde un VPS Linux.
+Este repositorio proporciona un **sistema sencillo, robusto y cifrado** para realizar copias de seguridad de proyectos **Supabase**, cubriendo:
 
-Este README es **la documentación única** del sistema:
-- No existe `env.sh`
-- Todo se basa en configuración **global** y **por proyecto**
-- Los scripts no contienen rutas hardcodeadas
+- ✅ Base de datos PostgreSQL (pg_dump)
+- ✅ Storage usando **Supabase S3 compatible + rclone**
+- ✅ Cifrado con `age`
+- ✅ Copias locales
+- ✅ Preparado para múltiples proyectos
 
----
-
-## 🎯 Qué hace este sistema
-
-- Backup de PostgreSQL (Supabase)
-- Backup de Supabase Storage
-- Soporte multi‑proyecto
-- Backups locales cifrados siempre
-- Backup remoto opcional (cold‑backup)
-- Restore manual y seguro
-- Alertas automáticas
-- Pensado para producción real
+> **Nota**: A partir de ahora, el backup de Storage **NO usa la API REST**, sino el endpoint **S3 compatible oficial de Supabase**, que es más estable y mantenible.
 
 ---
 
-## 🧱 Estructura del proyecto
+## 1. Requisitos
 
-```
-supabase-backups/
-├── bin/
-│   ├── backup-db.sh        # Backup PostgreSQL
-│   ├── restore-db.sh       # Restore PostgreSQL
-│   ├── backup-storage.sh   # Backup Storage
-│   ├── rotate-local.sh     # Retención local
-│   ├── run-all.sh          # Ejecución multi-proyecto
-│   └── alert.sh            # Alertas
-├── config/
-│   ├── global.env          # Configuración GLOBAL
-│   └── projects/           # Configuración POR PROYECTO
-│       └── demo.env
-├── backups/                # Backups locales cifrados
-├── logs/                   # Logs por proyecto
-└── tmp/                    # Temporales
-```
+Sistema Linux (Debian/Ubuntu recomendado).
 
----
-
-## ⚙️ Requisitos
-
-Sistema:
-- Debian / Ubuntu
-
-Paquetes necesarios:
+### Paquetes necesarios
 
 ```bash
-apt update
-apt install -y postgresql-client age rclone curl
+apt install -y   postgresql-client   rclone   age   jq   tar
 ```
-
-⚠️ El cliente PostgreSQL **debe coincidir con Supabase**  
-(Supabase Cloud usa PostgreSQL 15).
 
 ---
 
-## 🔐 Cifrado – Generación de claves
+## 2. Estructura del proyecto
 
-Todos los backups se cifran con **age**.
+```text
+supabase-backups/
+├── bin/
+│   ├── backup-db.sh
+│   └── backup-storage.sh
+├── config/
+│   ├── global.env
+│   ├── backup.pub
+│   └── projects/
+│       └── demo.env
+├── backups/
+├── logs/
+└── tmp/
+```
 
-### 1️⃣ Generar claves
+---
+
+## 3. Configuración global
+
+### `config/global.env`
+
+Variables comunes a todos los proyectos e infraestructura:
+
+```bash
+#!/usr/bin/env bash
+
+BASE_DIR="/root/supabase-backups"
+BIN_DIR="${BASE_DIR}/bin"
+TMP_DIR="${BASE_DIR}/tmp"
+LOG_DIR="${BASE_DIR}/logs"
+
+AGE_PUBLIC_KEY_FILE="${BASE_DIR}/config/backup.pub"
+
+# Retención local (en días)
+LOCAL_RETENTION_DAYS=7
+
+# rclone
+export RCLONE_CONFIG="/root/.config/rclone/rclone.conf"
+
+# Endpoint S3 de Supabase (se puede cambiar sin tocar rclone.conf)
+export RCLONE_S3_ENDPOINT="https://PROJECT_REF.supabase.co/storage/v1/s3"
+
+# Alertas (opcional)
+ALERT_TELEGRAM_ENABLED=false
+ALERT_TELEGRAM_BOT_TOKEN=""
+ALERT_TELEGRAM_CHAT_ID=""
+```
+
+---
+
+## 4. Configuración del proyecto
+
+Cada proyecto Supabase tiene **su propio fichero**, muy simple.
+
+### `config/projects/demo.env`
+
+```bash
+#!/usr/bin/env bash
+
+PROJECT_NAME="demo"
+ENVIRONMENT="production"
+
+# Base de datos Supabase
+PGHOST="db.xxxxx.supabase.co"
+PGPORT="5432"
+PGDATABASE="postgres"
+PGUSER="postgres"
+PGPASSWORD="SUPER_SECRET_PASSWORD"
+
+# Backups locales de este proyecto
+LOCAL_BACKUP_DIR="/root/supabase-backups/backups/demo"
+```
+
+Para añadir un nuevo proyecto:
+
+```bash
+cp config/projects/demo.env config/projects/otro.env
+```
+
+---
+
+## 5. Claves de cifrado (age)
+
+### Generar claves
 
 ```bash
 age-keygen -o backup.key
 ```
 
-Salida:
-```
-Public key: age1xxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-### 2️⃣ Ubicación de las claves
-
-- Clave privada (NO versionar):
-  ```
-  /root/secure/backup.key
-  ```
-
-- Clave pública:
-  ```
-  config/backup.pub
-  ```
-
----
-
-## 🧩 Configuración GLOBAL
-
-Archivo: `config/global.env`
+- Guarda **`backup.key`** en un lugar seguro (NO en el repo).
+- Copia la clave pública a:
 
 ```bash
-export BASE_DIR="/root/supabase-backups"
-export BIN_DIR="${BASE_DIR}/bin"
-export LOG_DIR="${BASE_DIR}/logs"
-export TMP_DIR="${BASE_DIR}/tmp"
-
-export PG_DUMP_BIN="/usr/lib/postgresql/15/bin/pg_dump"
-
-export AGE_PUBLIC_KEY_FILE="${BASE_DIR}/config/backup.pub"
-
-# Alertas (opcional)
-export ALERT_TELEGRAM_ENABLED=false
-export ALERT_TELEGRAM_BOT_TOKEN=""
-export ALERT_TELEGRAM_CHAT_ID=""
-
-# Backup remoto (opcional)
-export RCLONE_REMOTE=""
+cat backup.key | grep public > config/backup.pub
+chmod 600 backup.key config/backup.pub
 ```
-
-📌 `BASE_DIR` se define **solo aquí**.
 
 ---
 
-## 🧩 Configuración POR PROYECTO
+## 6. Configuración de Supabase Storage S3
 
-Archivo: `config/projects/demo.env`
+Supabase expone un endpoint **S3 compatible**.
+
+### Paso obligatorio en el dashboard
+
+1. Supabase Dashboard
+2. **Storage**
+3. **S3**
+4. Crear un **Access Key + Secret**
+
+Guarda esos valores.
+
+---
+
+## 7. Configuración de rclone
+
+### Variables de entorno (OBLIGATORIO)
+
+rclone usa las variables estándar de AWS:
 
 ```bash
-export PROJECT_NAME="demo"
-export ENVIRONMENT="production"
-
-export PGHOST="db.xxxxx.supabase.co"
-export PGPORT="5432"
-export PGDATABASE="postgres"
-export PGUSER="postgres"
-export PGPASSWORD="PASSWORD_REAL"
-
-export LOCAL_BACKUP_DIR="${BASE_DIR}/backups/${PROJECT_NAME}"
-export LOG_FILE="${LOG_DIR}/${PROJECT_NAME}.log"
-
-export RCLONE_BASE_PATH="${PROJECT_NAME}/${ENVIRONMENT}"
+export AWS_ACCESS_KEY_ID="TU_SUPABASE_S3_ACCESS_KEY"
+export AWS_SECRET_ACCESS_KEY="TU_SUPABASE_S3_SECRET_KEY"
 ```
 
-Añadir un proyecto = copiar este archivo.
+Pueden ir en:
+- `.bashrc`
+- `.profile`
+- `cron`
+- systemd
+- o exportarse antes de ejecutar scripts
 
 ---
 
-## 🗄️ Backup de Base de Datos
+### `rclone.conf` mínimo recomendado
+
+Ubicación habitual:
+
+```text
+/root/.config/rclone/rclone.conf
+```
+
+Contenido:
+
+```ini
+[supabase-s3]
+type = s3
+provider = Other
+env_auth = true
+region = us-east-1
+acl = private
+```
+
+> ⚠️ **No pongas credenciales ni endpoint en el config**  
+> Se pasan por variables de entorno.
+
+---
+
+### Verificación
 
 ```bash
-export SUPABASE_BACKUP_ENV=config/projects/demo.env
-bin/backup-db.sh
+rclone lsd supabase-s3:
 ```
 
-Resultado:
-```
-backups/demo/db/*.dump.age
-```
+Debe listar los buckets del proyecto (incluidos UUID).
 
 ---
 
-## 🔁 Restore de Base de Datos (manual)
+## 8. Backup del Storage (S3)
 
-```bash
-export SUPABASE_BACKUP_ENV=config/projects/demo.env
-export AGE_PRIVATE_KEY_FILE=/root/secure/backup.key
-
-bin/restore-db.sh demo_db_YYYY-MM-DD_HHMMSS.dump.age
-```
-
-El restore:
-- es explícito
-- limpia esquemas
-- desactiva triggers
-- es seguro para FK circulares
-
----
-
-## 📦 Backup de Storage
+### Ejecutar manualmente
 
 ```bash
 export SUPABASE_BACKUP_ENV=config/projects/demo.env
 bin/backup-storage.sh
 ```
 
-El método de acceso a Storage depende de tu entorno:
-- rclone S3 / WebDAV
-- Supabase CLI
-- API
+El proceso realiza:
+
+1. `rclone sync` completo desde Supabase S3
+2. Compresión (`tar.gz`)
+3. Cifrado (`.age`)
+4. Copia local en `backups/<proyecto>/storage/`
 
 ---
 
-## 🔁 Multi‑proyecto
+## 9. Backup de la base de datos
 
 ```bash
-bin/run-all.sh
+export SUPABASE_BACKUP_ENV=config/projects/demo.env
+bin/backup-db.sh
 ```
-
-Ejecuta todos los proyectos configurados.
 
 ---
 
-## 🧹 Retención local
+## 10. Restore del Storage (manual)
 
 ```bash
-bin/rotate-local.sh
-```
-
-Elimina backups antiguos según `LOCAL_RETENTION_DAYS`.
-
----
-
-## ⏱️ Cron recomendado
-
-```cron
-0 3 * * * /root/supabase-backups/bin/run-all.sh
-30 3 * * * /root/supabase-backups/bin/rotate-local.sh
+age -d -i backup.key demo_storage_YYYY-MM-DD_HHMMSS.tar.gz.age | tar -xz
+rclone sync data/ supabase-s3:
 ```
 
 ---
 
-## 🔔 Alertas
+## 11. Buenas prácticas
 
-Actualmente:
-- Telegram
-
-Diseñado para ampliar a email, Slack o webhooks.
-
----
-
-## 🧠 Principios de diseño
-
-- Una sola fuente de verdad
-- Nada automático sin intención
-- Backups locales siempre
-- Restore manual por seguridad
-- Pensado para producción
+- Ejecutar siempre los scripts con el **mismo usuario** que configuró rclone
+- No versionar:
+  - claves
+  - backups
+  - logs
+- Usar cron o systemd timers
+- Probar restores periódicamente
 
 ---
 
-## 📄 Licencia
+## 12. Resumen
 
-MIT
+- ✅ Storage respaldado vía **S3 oficial**
+- ✅ Sin API REST frágil
+- ✅ rclone probado y robusto
+- ✅ Configuración mínima por proyecto
+- ✅ Cifrado fuerte
+- ✅ Restore sencillo
+
+Este enfoque es el **más fiable y mantenible** hoy en Supabase.

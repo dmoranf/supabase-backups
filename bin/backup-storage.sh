@@ -2,11 +2,7 @@
 set -euo pipefail
 
 ###############################################################################
-# Supabase Storage Backup (REST API)
-# - Buckets desde Postgres (storage.buckets)
-# - Objetos vía API REST
-# - Descarga segura (SERVICE_ROLE_KEY)
-# - Tar + age
+# Supabase Storage Backup (S3-compatible via rclone)
 ###############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../config/global.env"
 
 # -----------------------------------------------------------------------------
-# Configuración de proyecto
+# Configuración del proyecto
 # -----------------------------------------------------------------------------
 if [ -z "${SUPABASE_BACKUP_ENV:-}" ]; then
   echo "[ERROR] SUPABASE_BACKUP_ENV no definida"
@@ -29,32 +25,22 @@ source "$SUPABASE_BACKUP_ENV"
 # -----------------------------------------------------------------------------
 # Validaciones
 # -----------------------------------------------------------------------------
-: "${PROJECT_NAME:?}"
-: "${SUPABASE_URL:?}"
-: "${SUPABASE_SERVICE_ROLE_KEY:?}"
-: "${LOCAL_BACKUP_DIR:?}"
-: "${AGE_PUBLIC_KEY_FILE:?}"
+: "${PROJECT_NAME:?PROJECT_NAME no definido}"
+: "${LOCAL_BACKUP_DIR:?LOCAL_BACKUP_DIR no definido}"
+: "${AGE_PUBLIC_KEY_FILE:?AGE_PUBLIC_KEY_FILE no definido}"
 
-: "${PGHOST:?}"
-: "${PGPORT:?}"
-: "${PGDATABASE:?}"
-: "${PGUSER:?}"
-: "${PGPASSWORD:?}"
-
-command -v psql >/dev/null || exit 1
-command -v curl >/dev/null || exit 1
-command -v jq >/dev/null || exit 1
-command -v age >/dev/null || exit 1
-command -v tar >/dev/null || exit 1
+command -v rclone >/dev/null || { echo "[ERROR] rclone no instalado"; exit 1; }
+command -v age >/dev/null || { echo "[ERROR] age no instalado"; exit 1; }
+command -v tar >/dev/null || { echo "[ERROR] tar no instalado"; exit 1; }
 
 # -----------------------------------------------------------------------------
-# Fechas y paths
+# Fechas y rutas
 # -----------------------------------------------------------------------------
 DATE="$(date +%F)"
 TS="$(date +%H%M%S)"
 
-TMP_DIR="${TMP_DIR}/${PROJECT_NAME}/storage"
-DATA_DIR="${TMP_DIR}/data"
+TMP_PROJECT_DIR="${TMP_DIR}/${PROJECT_NAME}/storage"
+DATA_DIR="${TMP_PROJECT_DIR}/data"
 
 ARCHIVE="${PROJECT_NAME}_storage_${DATE}_${TS}.tar.gz"
 ENCRYPTED="${ARCHIVE}.age"
@@ -64,80 +50,42 @@ LOCAL_FILE="${LOCAL_DIR}/${ENCRYPTED}"
 
 mkdir -p "$DATA_DIR" "$LOCAL_DIR" "$LOG_DIR"
 
-echo "[STORAGE] Backup iniciado ${DATE} ${TS}" >> "$LOG_FILE"
+echo "[STORAGE] Backup S3 iniciado ${DATE} ${TS}" >> "$LOG_FILE"
 
 # -----------------------------------------------------------------------------
-# 1. Obtener buckets desde Postgres
+# 1. Sync completo desde Supabase S3
 # -----------------------------------------------------------------------------
-echo "[STORAGE] Leyendo buckets desde storage.buckets" >> "$LOG_FILE"
-
-mapfile -t BUCKETS < <(
-  psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER password=$PGPASSWORD sslmode=require" \
-    -Atc "SELECT name FROM storage.buckets ORDER BY name;" |
-  tr -d '\r' | sed '/^[[:space:]]*$/d'
-)
-
-[ "${#BUCKETS[@]}" -eq 0 ] && exit 1
-
-# -----------------------------------------------------------------------------
-# 2. Descargar objetos bucket por bucket
-# -----------------------------------------------------------------------------
-for bucket in "${BUCKETS[@]}"; do
-  echo "[STORAGE] Bucket: $bucket" >> "$LOG_FILE"
-
-  BUCKET_DIR="${DATA_DIR}/${bucket}"
-  mkdir -p "$BUCKET_DIR"
-
-  OFFSET=0
-  LIMIT=1000
-
-  while true; do
-    RESPONSE="$(curl -fsS \
-      -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
-      -H "Content-Type: application/json" \
-      -X POST \
-      "${SUPABASE_URL}/storage/v1/object/list/${bucket}" \
-      -d "{\"limit\":${LIMIT},\"offset\":${OFFSET}}")"
-
-    COUNT="$(echo "$RESPONSE" | jq 'length')"
-    [ "$COUNT" -eq 0 ] && break
-
-    echo "$RESPONSE" | jq -r '.[].name' | while read -r OBJECT; do
-      DEST="${BUCKET_DIR}/${OBJECT}"
-      mkdir -p "$(dirname "$DEST")"
-
-      curl -fsS \
-        -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
-        "${SUPABASE_URL}/storage/v1/object/${bucket}/${OBJECT}" \
-        -o "$DEST"
-    done
-
-    OFFSET=$((OFFSET + LIMIT))
-  done
-done
+rclone sync \
+  supabase-s3: \
+  "$DATA_DIR" \
+  --fast-list \
+  --transfers 8 \
+  --checkers 8 \
+  --log-file "$LOG_FILE" \
+  --log-level INFO
 
 # -----------------------------------------------------------------------------
-# 3. Empaquetar
+# 2. Empaquetar
 # -----------------------------------------------------------------------------
-tar -czf "${TMP_DIR}/${ARCHIVE}" -C "$DATA_DIR" .
+tar -czf "${TMP_PROJECT_DIR}/${ARCHIVE}" -C "$DATA_DIR" .
 
 # -----------------------------------------------------------------------------
-# 4. Cifrar
+# 3. Cifrar
 # -----------------------------------------------------------------------------
 age -r "$(cat "$AGE_PUBLIC_KEY_FILE")" \
-  -o "${TMP_DIR}/${ENCRYPTED}" \
-  "${TMP_DIR}/${ARCHIVE}"
+  -o "${TMP_PROJECT_DIR}/${ENCRYPTED}" \
+  "${TMP_PROJECT_DIR}/${ARCHIVE}"
 
 # -----------------------------------------------------------------------------
-# 5. Copia local
+# 4. Copia local
 # -----------------------------------------------------------------------------
-cp "${TMP_DIR}/${ENCRYPTED}" "$LOCAL_FILE"
+cp "${TMP_PROJECT_DIR}/${ENCRYPTED}" "$LOCAL_FILE"
 
 # -----------------------------------------------------------------------------
-# 6. Limpieza
+# 5. Limpieza
 # -----------------------------------------------------------------------------
 rm -rf "$DATA_DIR" \
-       "${TMP_DIR}/${ARCHIVE}" \
-       "${TMP_DIR}/${ENCRYPTED}"
+       "${TMP_PROJECT_DIR:?}/${ARCHIVE}" \
+       "${TMP_PROJECT_DIR:?}/${ENCRYPTED}"
 
-echo "[STORAGE] Backup finalizado correctamente" >> "$LOG_FILE"
+echo "[STORAGE] Backup S3 finalizado correctamente" >> "$LOG_FILE"
