@@ -1,235 +1,127 @@
-# Supabase Backups (DB + Storage S3) — Guía completa
+# Supabase Backups (DB + Storage S3)
 
-Este repositorio implementa un sistema **auto‑contenible** para hacer copias de seguridad de proyectos **Supabase** en un VPS Linux:
+<div align="center">
 
-- ✅ **Backup de Base de Datos** (PostgreSQL) con `pg_dump`
-- ✅ **Backup de Storage** usando **S3 compatible** (Supabase Storage S3) con `rclone`
-- ✅ **Cifrado** de artefactos con `age`
-- ✅ **Retención / limpieza** local (y opcionalmente remota)
-- ✅ **Multi‑proyecto** (varios Supabase en la misma instalación)
-- ✅ **Orquestación** con `bin/run-all.sh` (ideal para cron)
-- ✅ **Alertas** (Telegram opcional)
+![Status](https://img.shields.io/badge/Status-Stable-brightgreen?style=flat-square)
+![Bash](https://img.shields.io/badge/Language-Bash-4EAA25?style=flat-square&logo=gnu-bash&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL-336791?style=flat-square&logo=postgresql&logoColor=white)
+![Supabase](https://img.shields.io/badge/Platform-Supabase-3ECF8E?style=flat-square&logo=supabase&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)
 
-> Importante: si usas `bin/run-all.sh`, **NO necesitas exportar variables manualmente antes**.  
-> `run-all` carga `config/global.env` y recorre automáticamente `config/projects/*.env` usando `bin/_bootstrap.sh`.
+**Sistema auto-contenible para realizar copias de seguridad robustas de proyectos Supabase en un VPS Linux.**
 
----
+[Características](#características-principales) • [Requisitos](#requisitos) • [Estructura](#estructura-del-proyecto) • [Instalación](#configuración) • [Uso](#uso) • [Restauración](#restauración)
 
-## 1) Requisitos
-
-### Paquetes necesarios (Debian/Ubuntu)
-
-```bash
-apt update
-apt install -y postgresql-client rclone age jq tar
-```
-
-Verificación rápida:
-
-```bash
-psql --version
-rclone version
-age --version
-jq --version
-tar --version
-```
+</div>
 
 ---
 
-## 2) Estructura y ficheros (los que tienes en `bin/`)
+## 📋 Características Principales
 
-Listado actual:
+Este repositorio implementa un sistema completo de backups para Supabase:
+
+- 🗄️ **Base de Datos**: Backup completo de PostgreSQL usando `pg_dump`.
+- 📦 **Storage**: Sincronización incremental usando S3 compatible + `rclone`.
+- 🔐 **Seguridad**: Cifrado fuerte de todos los backups localmente usando `age`.
+- 🧹 **Gestión Automática**: Rotación y limpieza de backups antiguos.
+- 🏗️ **Multi-proyecto**: Soporte para múltiples entornos/proyectos en el mismo servidor.
+- 🚨 **Alertas**: Notificaciones opcionales vía Telegram.
+
+## ⚠️ Aclaraciones Importantes
+
+> [!IMPORTANT]
+> **Endpoint S3 Correcto**:
+> Según la documentación oficial, usa siempre este formato: `https://<project-ref>.storage.supabase.co`
+>
+> ❌ **NO usar**: `https://<project-ref>.supabase.co/storage/v1/s3`
+
+> [!NOTE]
+> **Orquestación**:
+> - `run-all.sh`: Orquesta **SOLO** backups de Base de Datos.
+> - `backup-storage.sh`: Se ejecuta independientemente por proyecto (debido a duración y recursos).
+
+## 🛠 Requisitos
+
+Sistema basado en Debian/Ubuntu con las siguientes herramientas instaladas:
+
+```bash
+sudo apt update
+sudo apt install -y postgresql-client rclone age jq tar
+```
+
+## 📂 Estructura del Proyecto
+
+```mermaid
+graph TD
+    A[Cron] --> B[run-all.sh]
+    A --> C[backup-storage.sh]
+    B --> D[backup-db.sh]
+    C --> E[rclone sync]
+    D --> F[pg_dump]
+    F --> G[Cifrado age]
+    E --> H[Empaquetado tar + age]
+    G --> I[Disk / Local]
+    H --> I
+```
 
 ```text
-bin/
-├── _bootstrap.sh
-├── run-all.sh
-├── backup-db.sh
-├── restore-db.sh
-├── backup-storage.sh
-├── rotate-backup.sh
-├── rotate-local.sh
-└── alert.sh
+supabase-backups/
+├── bin/
+│   ├── run-all.sh              # Orquestador DB (Todos los proyectos)
+│   ├── backup-db.sh            # Script backup DB individual
+│   ├── backup-storage.sh       # Script backup Storage individual
+│   ├── rotate-backup.sh        # Rotación de logs/backups
+│   └── alert.sh                # Sistema de alertas
+├── config/
+│   ├── global.env              # Configuración compartida
+│   ├── backup.pub              # Clave pública para cifrado
+│   └── projects/               # Configs por proyecto
+│       └── demo.env
+├── backups/                    # Destino de backups
+└── logs/                       # Logs de ejecución
 ```
 
-### ¿Qué hace cada uno?
+## ⚙️ Configuración
 
-#### `bin/_bootstrap.sh`
-- Punto común de “arranque”.
-- Carga `config/global.env`.
-- Carga el fichero de proyecto (`config/projects/*.env`) que corresponda.
-- Deja preparadas rutas (`BASE_DIR`, `LOG_DIR`, etc.) y variables necesarias.
+### 1. Configuración Global (`config/global.env`)
 
-> Si un script “no encuentra variables”, normalmente es porque no se ha ejecutado pasando por `_bootstrap.sh`.
-
-#### `bin/run-all.sh`
-- Orquestador recomendado para cron.
-- Recorre todos los proyectos (`config/projects/*.env`) y ejecuta las acciones definidas (DB, Storage y/o rotación).
-- Integra logs y (opcionalmente) alertas.
-
-**Ventaja:** para cron, **un único punto de entrada**.
-
-#### `bin/backup-db.sh`
-- Genera un dump de PostgreSQL con `pg_dump`.
-- Comprime/cifra (según vuestra implementación).
-- Guarda la copia en el directorio local del proyecto.
-
-#### `bin/restore-db.sh`
-- Restaura un dump (descifra/descomprime si aplica) contra PostgreSQL.
-
-#### `bin/backup-storage.sh`
-- Realiza un `rclone sync` desde Supabase Storage S3 (endpoint S3 compatible).
-- Empaqueta el resultado (tar) + cifra con `age`.
-- Guarda copia local en el directorio del proyecto.
-- (Opcional) sube a remoto si está configurado.
-
-#### `bin/rotate-backup.sh`
-- Limpieza principal por retención: borra backups antiguos (local y/o remoto según vuestra lógica).
-- Se basa en `LOCAL_RETENTION_DAYS` (global) y/o en rutas del proyecto.
-
-#### `bin/rotate-local.sh`
-- Limpieza local auxiliar (si lo usáis para tmp/cache/logs o subcarpetas específicas).
-- Normalmente se ejecuta después de backups o desde `rotate-backup.sh`.
-
-#### `bin/alert.sh`
-- Envío de alertas (p.ej. Telegram) si `ALERT_TELEGRAM_ENABLED=true`.
-- Lo suele invocar `run-all.sh` o scripts concretos ante fallos/éxitos.
-
----
-
-## 3) Configuración global (infraestructura)
-
-### `config/global.env` (tal como lo estáis usando)
-
-> Aquí NO se define nada específico de Storage S3. Solo infraestructura común.
+Define la infraestructura común.
 
 ```bash
-#!/usr/bin/env bash
-
-# Base
-export BASE_DIR="/opt/supabase-backups"
-export BIN_DIR="${BASE_DIR}/bin"
-export LOG_DIR="${BASE_DIR}/logs"
-export TMP_DIR="${BASE_DIR}/tmp"
-
-# PostgreSQL
-export PG_DUMP_BIN="/usr/lib/postgresql/15/bin/pg_dump"
-
-# Backups locales (retención en días)
+export BASE_DIR="/root/supabase-backups"
 export LOCAL_RETENTION_DAYS=7
-
-# Cifrado
 export AGE_PUBLIC_KEY_FILE="${BASE_DIR}/config/backup.pub"
-
-# Alertas (opcional)
 export ALERT_TELEGRAM_ENABLED=false
-export ALERT_TELEGRAM_BOT_TOKEN="XXXXX"
-export ALERT_TELEGRAM_CHAT_ID="YYYYY"
-
-# Remoto (opcional)
-export RCLONE_REMOTE=""
 ```
 
----
+### 2. Configuración por Proyecto (`config/projects/demo.env`)
 
-## 4) Configuración por proyecto (Supabase + Storage S3)
-
-Cada proyecto tiene un fichero en `config/projects/`.
-
-Ejemplo recomendado: `config/projects/demo.env`
+Configuración específica para conectar a Supabase DB y S3.
 
 ```bash
-#!/usr/bin/env bash
-
 export PROJECT_NAME="Demo"
-export ENVIRONMENT="production"
-
-# Supabase DB
 export PGHOST="db.xxxxx.supabase.co"
-export PGPORT="5432"
-export PGDATABASE="postgres"
-export PGUSER="postgres"
 export PGPASSWORD="SUPER_SECRET"
 
-# Paths derivados
-export PROJECT_DIR="${BASE_DIR}/backups/${PROJECT_NAME}"
-export LOG_FILE="${LOG_DIR}/${PROJECT_NAME}.log"
-export LOCAL_BACKUP_DIR="${BASE_DIR}/backups/${PROJECT_NAME}"
-
-# Remoto (opcional por proyecto)
-export RCLONE_BASE_PATH="${PROJECT_NAME}/${ENVIRONMENT}"
-
-# Supabase Storage (S3)
-export SUPABASE_URL="https://xxxx.supabase.co"
-
-# OJO: la variable correcta es AWS_ACCESS_KEY_ID (con doble "C")
-export AWS_ACCESS_KEY_ID="SUPABASE_S3_ACCESS_KEY"
-export AWS_SECRET_ACCESS_KEY="SUPABASE_S3_SECRET_KEY"
-
-# Endpoint S3 compatible de Supabase (por proyecto)
-export RCLONE_S3_ENDPOINT="https://xxxx.supabase.co/storage/v1/s3"
+# Storage S3
+export AWS_ACCESS_KEY_ID="clave_id"
+export AWS_SECRET_ACCESS_KEY="clave_secreta"
+export RCLONE_S3_ENDPOINT="https://<project-ref>.storage.supabase.co"
 ```
 
-### Notas importantes
-- `AWS_ACCESS_KEY_ID` y `AWS_SECRET_ACCESS_KEY` **son las variables estándar** que rclone lee cuando `env_auth=true`.
-- El endpoint S3 compatible de Supabase es:
-  - ✅ `https://<project-ref>.supabase.co/storage/v1/s3`
-  - ❌ NO uses `...storage.supabase.co...` si te da problemas (el endpoint recomendado es el anterior).
-- Puedes tener **un endpoint distinto por proyecto** (por eso va aquí y no en global).
+### 3. Cifrado (`age`)
 
----
-
-## 5) Cifrado con age
-
-### 5.1 Generar clave privada y pública
+Genera las claves. **Guarda `backup.key` en un lugar seguro (fuera del servidor)**.
 
 ```bash
 age-keygen -o backup.key
-```
-
-- `backup.key` = **clave privada** (NO la subas al repo)
-- `backup.pub` = **clave pública** (sí puede estar en el repo)
-
-Crear/actualizar `config/backup.pub`:
-
-```bash
 grep public backup.key > config/backup.pub
 chmod 600 backup.key config/backup.pub
 ```
 
----
+### 4. Rclone (`~/.config/rclone/rclone.conf`)
 
-## 6) Supabase Storage S3: crear keys en el Dashboard
-
-Para cada proyecto:
-
-1. Supabase Dashboard
-2. **Storage**
-3. **S3**
-4. Crear **Access Key** y **Secret**
-5. Copiarlo al `config/projects/<proyecto>.env`:
-   - `AWS_ACCESS_KEY_ID`
-   - `AWS_SECRET_ACCESS_KEY`
-
-> Estas keys son específicas de Storage S3. No son la service role key.
-
----
-
-## 7) rclone: configuración mínima (sin secretos en disco)
-
-### 7.1 ¿Dónde está el config?
-
-```bash
-rclone config file
-```
-
-Habitual (root):
-
-```text
-/root/.config/rclone/rclone.conf
-```
-
-### 7.2 `rclone.conf` mínimo recomendado
+Configuración mínima para el provider S3 genérico.
 
 ```ini
 [supabase-s3]
@@ -240,191 +132,47 @@ region = us-east-1
 acl = private
 ```
 
-**No metas** credenciales ni endpoint aquí: se inyectan desde el `project.env` por variables de entorno.
+## 🚀 Uso
 
-### 7.3 Verificación rápida (con un proyecto cargado)
+### Ejecución Manual
 
-Para que rclone vea `AWS_*` y `RCLONE_S3_ENDPOINT`, primero debes cargar un proyecto (o usar `run-all`).
+| Acción | Comando |
+|--------|---------|
+| **Backup DB (Todos)** | `bin/run-all.sh` |
+| **Backup DB (Uno)** | `export SUPABASE_BACKUP_ENV=config/projects/demo.env && bin/backup-db.sh` |
+| **Backup Storage** | `export SUPABASE_BACKUP_ENV=config/projects/demo.env && bin/backup-storage.sh` |
 
-Prueba manual (sin cron):
+### Automatización (Cron)
 
-```bash
-# Carga global + un proyecto (elige uno)
-source config/global.env
-source config/projects/demo.env
-
-# Verifica que rclone ve endpoint y creds por entorno
-env | egrep 'AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|RCLONE_S3_ENDPOINT'
-
-# Listado (si vuestro backup-storage usa --s3-endpoint internamente, esto es opcional)
-rclone lsd supabase-s3:
-```
-
-> Si vuestro `backup-storage.sh` pasa el endpoint como flag (`--s3-endpoint "$RCLONE_S3_ENDPOINT"`), `rclone lsd` funcionará sin tocar el config.
-
----
-
-## 8) Ejecución manual (para pruebas)
-
-### 8.1 Ejecutar un proyecto concreto (manual)
-
-Si quieres probar solo un proyecto sin `run-all`:
-
-```bash
-export SUPABASE_BACKUP_ENV="config/projects/demo.env"
-bin/backup-db.sh
-bin/backup-storage.sh
-```
-
-> Útil para depurar credenciales o conectividad de un proyecto.
-
-### 8.2 Ejecutar TODOS los proyectos (manual)
-
-```bash
-bin/run-all.sh
-```
-
----
-
-## 9) Cron: ejemplos recomendados (DB diario + Storage semanal + limpieza)
-
-> Cron **debe llamar a `run-all.sh`** (no hace falta exportar nada antes).
-
-Edita crontab:
-
-```bash
-crontab -e
-```
-
-### 9.1 Backup DB diario nocturno (todos los proyectos)
-Ejemplo: todos los días a las **02:00**
+Ejemplos recomendados para `/etc/crontab` o `crontab -e`:
 
 ```cron
-0 2 * * * cd /opt/supabase-backups && bin/run-all.sh >> logs/cron-run-all.log 2>&1
+# DB diario a las 02:00
+0 2 * * * cd /root/supabase-backups && bin/run-all.sh >> logs/cron-db.log 2>&1
+
+# Storage semanal (Domingos 03:00)
+0 3 * * 0 cd /root/supabase-backups && for f in config/projects/*.env; do export SUPABASE_BACKUP_ENV="$f"; bin/backup-storage.sh; done >> logs/cron-storage.log 2>&1
+
+# Limpieza diaria (04:30)
+30 4 * * * cd /root/supabase-backups && bin/rotate-backup.sh >> logs/cron-rotate.log 2>&1
 ```
 
-> Si vuestro `run-all.sh` ejecuta DB por defecto cada día, este es el setup más simple.
+## 🔄 Restauración
 
-### 9.2 Backup Storage semanal (proyecto a proyecto)
-Ejemplo: domingos a las **03:30**
+Para restaurar los backups cifrados, necesitas tu clave privada (`backup.key`).
 
-```cron
-30 3 * * 0 cd /opt/supabase-backups && bin/run-all.sh >> logs/cron-run-all-storage.log 2>&1
-```
-
-> **Recomendación**: si queréis que el storage sea “semanal” de verdad, haced que `run-all.sh` decida:
-> - DB: diario
-> - Storage: solo si es domingo (o si recibe un flag)
-
-Si vuestro `run-all.sh` soporta flags (si no, podéis añadirlo), el patrón ideal sería:
-- DB diario: `bin/run-all.sh --db`
-- Storage semanal: `bin/run-all.sh --storage`
-
-(usa los flags reales que tengáis implementados).
-
-### 9.3 Limpieza diaria (retención)
-Ejemplo: todos los días a las **04:30**
-
-```cron
-30 4 * * * cd /opt/supabase-backups && bin/rotate-backup.sh >> logs/cron-rotate.log 2>&1
-```
-
----
-
-## 10) Retención / limpieza: cómo funciona (conceptual)
-
-- `LOCAL_RETENTION_DAYS` (global) define cuántos días conservar backups locales.
-- `rotate-backup.sh` elimina:
-  - backups locales antiguos (por edad)
-  - (opcional) backups remotos si `RCLONE_REMOTE` y `RCLONE_BASE_PATH` se usan
-- `rotate-local.sh` puede limpiar `tmp/` y restos intermedios.
-
-> Consejo: mantén logs de cron (`logs/cron-*.log`) y rota con logrotate si crecen.
-
----
-
-## 11) Restore (manual)
-
-### 11.1 Restore DB (ejemplo conceptual)
-Depende de vuestro formato exacto (si está `.gz.age`, etc.). Un patrón típico:
+### Base de Datos
 
 ```bash
-age -d -i backup.key demo_db_YYYY-MM-DD.sql.gz.age | gunzip | psql \
-  "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER password=$PGPASSWORD sslmode=require"
+age -d -i backup.key demo_db_YYYY-MM-DD.sql.gz.age | gunzip | psql -h ...
 ```
 
-### 11.2 Restore Storage (S3)
-Si el backup de storage genera un tar cifrado que contiene una carpeta `data/`:
+### Storage
 
 ```bash
-age -d -i backup.key Demo_storage_YYYY-MM-DD_HHMMSS.tar.gz.age | tar -xz
-rclone sync data/ supabase-s3:
+# 1. Descifrar y descomprimir
+age -d -i backup.key Demo_storage_YYYY-MM-DD.tar.gz.age | tar -xz
+
+# 2. Restaurar con rclone (cuidado, esto sobrescribe)
+rclone sync data/ supabase-s3:bucket-name
 ```
-
-> En restore, ten cuidado: `rclone sync` puede borrar en destino si faltan ficheros en origen.  
-> Para pruebas: usa `rclone copy` primero.
-
----
-
-## 12) Seguridad y buenas prácticas
-
-- No subas al repo:
-  - `backup.key`
-  - `config/projects/*.env` reales con secretos (o al menos exclúyelos en `.gitignore`)
-- Ejecuta cron siempre con el **mismo usuario** que tiene:
-  - `rclone.conf`
-  - permisos de escritura en `/opt/supabase-backups`
-- Añade un **lock** en `run-all.sh` (recomendado) para evitar solapes si una tarea se alarga.
-- Prueba restores periódicamente.
-
----
-
-## 13) Quick Start (copiar/pegar)
-
-1) Instalar dependencias:
-```bash
-apt install -y postgresql-client rclone age jq tar
-```
-
-2) Crear claves `age`:
-```bash
-cd /opt/supabase-backups
-age-keygen -o backup.key
-grep public backup.key > config/backup.pub
-chmod 600 backup.key config/backup.pub
-```
-
-3) Crear proyecto:
-```bash
-cp config/projects/demo.env config/projects/mi-proyecto.env
-# Edita credenciales DB y claves S3 en mi-proyecto.env
-```
-
-4) Configurar rclone:
-```bash
-rclone config file
-# Asegúrate de tener un remote [supabase-s3] como en la sección 7.2
-```
-
-5) Probar manual:
-```bash
-bin/run-all.sh
-```
-
-6) Programar cron:
-```bash
-crontab -e
-# pega las entradas de la sección 9
-```
-
----
-
-## 14) Resumen
-
-- `run-all.sh` es el punto de entrada recomendado (cron)
-- Storage se respalda vía **S3 oficial** (rclone)
-- Configuración de Storage **por proyecto**
-- Cifrado con `age`
-- Limpieza con `rotate-backup.sh`
-
-Listo para producción, con un diseño claro y mantenible.
