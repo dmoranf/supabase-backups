@@ -2,11 +2,11 @@
 set -euo pipefail
 
 ###############################################################################
-# Backup de Supabase Storage
-# - Descubre buckets desde Postgres (storage.buckets)
-# - Copia cada bucket con rclone
-# - Empaqueta + cifra con age
-# - Guarda copia local
+# Supabase Storage Backup (REST API)
+# - Buckets desde Postgres (storage.buckets)
+# - Objetos vía API REST
+# - Descarga segura (SERVICE_ROLE_KEY)
+# - Tar + age
 ###############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,30 +27,34 @@ fi
 source "$SUPABASE_BACKUP_ENV"
 
 # -----------------------------------------------------------------------------
-# Validaciones obligatorias
+# Validaciones
 # -----------------------------------------------------------------------------
-: "${PROJECT_NAME:?PROJECT_NAME no definido}"
-: "${LOCAL_BACKUP_DIR:?LOCAL_BACKUP_DIR no definido}"
-: "${AGE_PUBLIC_KEY_FILE:?AGE_PUBLIC_KEY_FILE no definido}"
+: "${PROJECT_NAME:?}"
+: "${SUPABASE_URL:?}"
+: "${SUPABASE_SERVICE_ROLE_KEY:?}"
+: "${LOCAL_BACKUP_DIR:?}"
+: "${AGE_PUBLIC_KEY_FILE:?}"
 
-: "${PGHOST:?PGHOST no definido}"
-: "${PGPORT:?PGPORT no definido}"
-: "${PGDATABASE:?PGDATABASE no definido}"
-: "${PGUSER:?PGUSER no definido}"
-: "${PGPASSWORD:?PGPASSWORD no definido}"
+: "${PGHOST:?}"
+: "${PGPORT:?}"
+: "${PGDATABASE:?}"
+: "${PGUSER:?}"
+: "${PGPASSWORD:?}"
 
-command -v psql >/dev/null || { echo "[ERROR] psql no instalado"; exit 1; }
-command -v rclone >/dev/null || { echo "[ERROR] rclone no instalado"; exit 1; }
-command -v age >/dev/null || { echo "[ERROR] age no instalado"; exit 1; }
+command -v psql >/dev/null || exit 1
+command -v curl >/dev/null || exit 1
+command -v jq >/dev/null || exit 1
+command -v age >/dev/null || exit 1
+command -v tar >/dev/null || exit 1
 
 # -----------------------------------------------------------------------------
-# Fechas y rutas
+# Fechas y paths
 # -----------------------------------------------------------------------------
 DATE="$(date +%F)"
 TS="$(date +%H%M%S)"
 
-TMP_PROJECT_DIR="${TMP_DIR}/${PROJECT_NAME}/storage"
-DATA_DIR="${TMP_PROJECT_DIR}/data"
+TMP_DIR="${TMP_DIR}/${PROJECT_NAME}/storage"
+DATA_DIR="${TMP_DIR}/data"
 
 ARCHIVE="${PROJECT_NAME}_storage_${DATE}_${TS}.tar.gz"
 ENCRYPTED="${ARCHIVE}.age"
@@ -63,61 +67,77 @@ mkdir -p "$DATA_DIR" "$LOCAL_DIR" "$LOG_DIR"
 echo "[STORAGE] Backup iniciado ${DATE} ${TS}" >> "$LOG_FILE"
 
 # -----------------------------------------------------------------------------
-# Obtener buckets desde Postgres (FUENTE DE VERDAD)
+# 1. Obtener buckets desde Postgres
 # -----------------------------------------------------------------------------
-echo "[STORAGE] Descubriendo buckets desde storage.buckets" >> "$LOG_FILE"
+echo "[STORAGE] Leyendo buckets desde storage.buckets" >> "$LOG_FILE"
 
 mapfile -t BUCKETS < <(
   psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER password=$PGPASSWORD sslmode=require" \
     -Atc "SELECT name FROM storage.buckets ORDER BY name;" |
-  sed '/^[[:space:]]*$/d'
+  tr -d '\r' | sed '/^[[:space:]]*$/d'
 )
 
-if [ "${#BUCKETS[@]}" -eq 0 ]; then
-  echo "[STORAGE] ERROR: no se encontraron buckets en storage.buckets" >> "$LOG_FILE"
-  exit 1
-fi
+[ "${#BUCKETS[@]}" -eq 0 ] && exit 1
 
 # -----------------------------------------------------------------------------
-# Copiar cada bucket
+# 2. Descargar objetos bucket por bucket
 # -----------------------------------------------------------------------------
 for bucket in "${BUCKETS[@]}"; do
-  bucket="$(echo "$bucket" | xargs)"   # trim espacios
-  [ -z "$bucket" ] && continue
+  echo "[STORAGE] Bucket: $bucket" >> "$LOG_FILE"
 
-  echo "[STORAGE] Copiando bucket: $bucket" >> "$LOG_FILE"
+  BUCKET_DIR="${DATA_DIR}/${bucket}"
+  mkdir -p "$BUCKET_DIR"
 
-  rclone copy \
-    "supabase-storage:${bucket}" \
-    "${DATA_DIR}/${bucket}" \
-    --transfers 8 \
-    --checkers 8 \
-    --create-empty-src-dirs \
-    --quiet
+  OFFSET=0
+  LIMIT=1000
+
+  while true; do
+    RESPONSE="$(curl -fsS \
+      -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+      -H "Content-Type: application/json" \
+      -X POST \
+      "${SUPABASE_URL}/storage/v1/object/list/${bucket}" \
+      -d "{\"limit\":${LIMIT},\"offset\":${OFFSET}}")"
+
+    COUNT="$(echo "$RESPONSE" | jq 'length')"
+    [ "$COUNT" -eq 0 ] && break
+
+    echo "$RESPONSE" | jq -r '.[].name' | while read -r OBJECT; do
+      DEST="${BUCKET_DIR}/${OBJECT}"
+      mkdir -p "$(dirname "$DEST")"
+
+      curl -fsS \
+        -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+        "${SUPABASE_URL}/storage/v1/object/${bucket}/${OBJECT}" \
+        -o "$DEST"
+    done
+
+    OFFSET=$((OFFSET + LIMIT))
+  done
 done
 
 # -----------------------------------------------------------------------------
-# Empaquetar
+# 3. Empaquetar
 # -----------------------------------------------------------------------------
-tar -czf "${TMP_PROJECT_DIR}/${ARCHIVE}" -C "$DATA_DIR" .
+tar -czf "${TMP_DIR}/${ARCHIVE}" -C "$DATA_DIR" .
 
 # -----------------------------------------------------------------------------
-# Cifrar
+# 4. Cifrar
 # -----------------------------------------------------------------------------
 age -r "$(cat "$AGE_PUBLIC_KEY_FILE")" \
-  -o "${TMP_PROJECT_DIR}/${ENCRYPTED}" \
-  "${TMP_PROJECT_DIR}/${ARCHIVE}"
+  -o "${TMP_DIR}/${ENCRYPTED}" \
+  "${TMP_DIR}/${ARCHIVE}"
 
 # -----------------------------------------------------------------------------
-# Copia local
+# 5. Copia local
 # -----------------------------------------------------------------------------
-cp "${TMP_PROJECT_DIR}/${ENCRYPTED}" "$LOCAL_FILE"
+cp "${TMP_DIR}/${ENCRYPTED}" "$LOCAL_FILE"
 
 # -----------------------------------------------------------------------------
-# Limpieza
+# 6. Limpieza
 # -----------------------------------------------------------------------------
 rm -rf "$DATA_DIR" \
-       "${TMP_PROJECT_DIR:?}/${ARCHIVE}" \
-       "${TMP_PROJECT_DIR:?}/${ENCRYPTED}"
+       "${TMP_DIR}/${ARCHIVE}" \
+       "${TMP_DIR}/${ENCRYPTED}"
 
 echo "[STORAGE] Backup finalizado correctamente" >> "$LOG_FILE"
