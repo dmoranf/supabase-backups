@@ -1,0 +1,3 @@
+config/*.sh
+!config/env.sh.example
+config/backup.pub
