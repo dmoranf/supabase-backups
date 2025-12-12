@@ -2,11 +2,11 @@
 set -euo pipefail
 
 ###############################################################################
-# Backup de Supabase Storage (buckets dinámicos)
-# - Descubre buckets vía API
+# Backup de Supabase Storage
+# - Descubre buckets desde Postgres (storage.buckets)
 # - Copia cada bucket con rclone
 # - Empaqueta + cifra con age
-# - Guarda backup local
+# - Guarda copia local
 ###############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,12 +31,16 @@ source "$SUPABASE_BACKUP_ENV"
 # -----------------------------------------------------------------------------
 : "${PROJECT_NAME:?PROJECT_NAME no definido}"
 : "${LOCAL_BACKUP_DIR:?LOCAL_BACKUP_DIR no definido}"
-: "${SUPABASE_URL:?SUPABASE_URL no definido}"
-: "${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY no definido}"
 : "${AGE_PUBLIC_KEY_FILE:?AGE_PUBLIC_KEY_FILE no definido}"
 
+: "${PGHOST:?PGHOST no definido}"
+: "${PGPORT:?PGPORT no definido}"
+: "${PGDATABASE:?PGDATABASE no definido}"
+: "${PGUSER:?PGUSER no definido}"
+: "${PGPASSWORD:?PGPASSWORD no definido}"
+
+command -v psql >/dev/null || { echo "[ERROR] psql no instalado"; exit 1; }
 command -v rclone >/dev/null || { echo "[ERROR] rclone no instalado"; exit 1; }
-command -v jq >/dev/null || { echo "[ERROR] jq no instalado"; exit 1; }
 command -v age >/dev/null || { echo "[ERROR] age no instalado"; exit 1; }
 
 # -----------------------------------------------------------------------------
@@ -59,19 +63,17 @@ mkdir -p "$DATA_DIR" "$LOCAL_DIR" "$LOG_DIR"
 echo "[STORAGE] Backup iniciado ${DATE} ${TS}" >> "$LOG_FILE"
 
 # -----------------------------------------------------------------------------
-# Obtener buckets dinámicamente desde Supabase API
+# Obtener buckets desde Postgres (FUENTE DE VERDAD)
 # -----------------------------------------------------------------------------
-echo "[STORAGE] Obteniendo lista dinámica de buckets" >> "$LOG_FILE"
+echo "[STORAGE] Descubriendo buckets desde storage.buckets" >> "$LOG_FILE"
 
 mapfile -t BUCKETS < <(
-  curl -fsS \
-    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
-    "${SUPABASE_URL}/storage/v1/bucket" |
-  jq -r '.[].name'
+  psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER password=$PGPASSWORD sslmode=require" \
+    -Atc "SELECT name FROM storage.buckets ORDER BY name;"
 )
 
 if [ "${#BUCKETS[@]}" -eq 0 ]; then
-  echo "[STORAGE] ERROR: no se encontraron buckets" >> "$LOG_FILE"
+  echo "[STORAGE] ERROR: no se encontraron buckets en storage.buckets" >> "$LOG_FILE"
   exit 1
 fi
 
@@ -79,7 +81,10 @@ fi
 # Copiar cada bucket
 # -----------------------------------------------------------------------------
 for bucket in "${BUCKETS[@]}"; do
-  echo "[STORAGE] Copiando bucket: ${bucket}" >> "$LOG_FILE"
+  bucket="$(echo "$bucket" | xargs)"
+  [ -z "$bucket" ] && continue
+
+  echo "[STORAGE] Copiando bucket: $bucket" >> "$LOG_FILE"
 
   rclone copy \
     "supabase-storage:${bucket}" \
