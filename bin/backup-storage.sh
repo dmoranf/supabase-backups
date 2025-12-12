@@ -69,7 +69,8 @@ echo "[STORAGE] Descubriendo buckets desde storage.buckets" >> "$LOG_FILE"
 
 mapfile -t BUCKETS < <(
   psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER password=$PGPASSWORD sslmode=require" \
-    -Atc "SELECT name FROM storage.buckets ORDER BY name;"
+    -Atc "SELECT name FROM storage.buckets ORDER BY name;" |
+  sed '/^[[:space:]]*$/d'
 )
 
 if [ "${#BUCKETS[@]}" -eq 0 ]; then
@@ -81,7 +82,7 @@ fi
 # Copiar cada bucket
 # -----------------------------------------------------------------------------
 for bucket in "${BUCKETS[@]}"; do
-  bucket="$(echo "$bucket" | xargs)"
+  bucket="$(echo "$bucket" | xargs)"   # trim espacios
   [ -z "$bucket" ] && continue
 
   echo "[STORAGE] Copiando bucket: $bucket" >> "$LOG_FILE"
