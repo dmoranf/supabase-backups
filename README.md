@@ -59,15 +59,19 @@ brew install libpq rclone age gnu-tar
 
 ```mermaid
 graph TD
-    A[Cron] --> B[run-all.sh]
-    A --> C[backup-storage.sh]
-    B --> D[backup-db.sh]
-    C --> E[rclone sync]
-    D --> F[pg_dump]
-    F --> G[Cifrado age]
-    E --> H[Empaquetado tar + age]
-    G --> I[Disk / Local]
+    A[Cron / User] -->|--db| B[run-all.sh]
+    A -->|--storage| B
+    A -->|--all| B
+    B --> C{Modo?}
+    C -->|DB| D[backup-db.sh]
+    C -->|Storage| E[backup-storage.sh]
+    D --> F[pg_dump | age]
+    E -->|--incremental| G[rclone sync to cache]
+    E -->|--full| H[Clean cache & sync]
+    G --> I[Tar + age]
     H --> I
+    I --> J[Disk / S3]
+    F --> J
 ```
 
 ```text
@@ -136,6 +140,22 @@ env_auth = true
 region = us-east-1
 acl = private
 ```
+
+### 5. Monitorización (Healthchecks.io)
+
+El sistema soporta integración nativa con Healthchecks.io (o compatible) para detectar fallos silenciosos ("Dead Man's Switch").
+
+1. Crea un check en Healthchecks.io.
+2. Añade la URL en tu configuración (`global.env` o por proyecto):
+
+```bash
+export HEALTHCHECK_URL="https://hc-ping.com/tu-uuid"
+```
+
+El script enviará pings automáticos:
+- `/start` al iniciar.
+- `/fail` en caso de error.
+- `OK` al finalizar correctamente.
 
 ## 🚀 Uso
 
