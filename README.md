@@ -65,10 +65,10 @@ graph TD
     B --> C{Modo?}
     C -->|DB| D[backup-db.sh]
     C -->|Storage| E[backup-storage.sh]
-    D --> F[pg_dump | age]
+    D --> F["pg_dump | age"]
     E -->|--incremental| G[rclone sync to cache]
     E -->|--full| H[Clean cache & sync]
-    G --> I[Tar + age]
+    G --> I["Tar + age"]
     H --> I
     I --> J[Disk / S3]
     F --> J
