@@ -10,6 +10,29 @@ if [ -z "${SUPABASE_BACKUP_ENV:-}" ]; then
 fi
 source "$SUPABASE_BACKUP_ENV"
 
+# Derived paths (Inline Logic)
+PROJECT_DIR="${BASE_DIR}/backups/${PROJECT_NAME}"
+LOG_FILE="${LOG_DIR}/${PROJECT_NAME}.log"
+LOCAL_BACKUP_DIR="${BASE_DIR}/backups/${PROJECT_NAME}"
+
+# Healthcheck start
+if [ -n "${HEALTHCHECK_URL:-}" ]; then
+  curl -m 10 -fsS "${HEALTHCHECK_URL}/start" >/dev/null 2>&1 || true
+fi
+
+# Error Handler
+handle_error() {
+  local exit_code=$?
+  local line_number=$1
+  echo "[ERROR] Fallo en línea $line_number con código $exit_code" >> "$LOG_FILE"
+  "${BIN_DIR}/alert.sh" "ERROR" "$PROJECT_NAME" "Fallo fatal en línea $line_number. Exit code: $exit_code"
+  
+  if [ -n "${HEALTHCHECK_URL:-}" ]; then
+    curl -m 10 -fsS "${HEALTHCHECK_URL}/fail" >/dev/null 2>&1 || true
+  fi
+}
+trap 'handle_error $LINENO' ERR
+
 has_remote() {
   command -v rclone >/dev/null 2>&1 \
     && [ -n "${RCLONE_REMOTE:-}" ] \
@@ -22,8 +45,8 @@ TS=$(date +%H%M%S)
 FILENAME="${PROJECT_NAME}_db_${DATE}_${TS}.dump"
 ENCRYPTED="${FILENAME}.age"
 
+# TMP is only for encrypted result if we need to upload it
 TMP_PROJECT_DIR="${TMP_DIR}/${PROJECT_NAME}"
-TMP_FILE="${TMP_PROJECT_DIR}/${FILENAME}"
 TMP_ENC="${TMP_PROJECT_DIR}/${ENCRYPTED}"
 
 LOCAL_DIR="${LOCAL_BACKUP_DIR}/db"
@@ -33,17 +56,12 @@ mkdir -p "$TMP_PROJECT_DIR" "$LOCAL_DIR" "$LOG_DIR"
 
 echo "[DB] Backup iniciado ${DATE} ${TS}" >> "$LOG_FILE"
 
-"$PG_DUMP_BIN" \
+# Streaming: pg_dump -> age -> TMP_ENC (avoids plain dump on disk)
+"${PG_DUMP_BIN:-pg_dump}" \
   --format=custom \
   --no-owner \
   --no-privileges \
-  > "$TMP_FILE"
-
-age -r "$(cat "$AGE_PUBLIC_KEY_FILE")" \
-  -o "$TMP_ENC" \
-  "$TMP_FILE"
-
-rm "$TMP_FILE"
+  | age -r "$(cat "$AGE_PUBLIC_KEY_FILE")" > "$TMP_ENC"
 
 echo "[DB] Copia local: $LOCAL_FILE" >> "$LOG_FILE"
 cp "$TMP_ENC" "$LOCAL_FILE"
@@ -63,3 +81,8 @@ fi
 rm "$TMP_ENC"
 
 echo "[DB] Backup finalizado ${DATE} ${TS}" >> "$LOG_FILE"
+
+# Healthcheck success
+if [ -n "${HEALTHCHECK_URL:-}" ]; then
+  curl -m 10 -fsS "${HEALTHCHECK_URL}" >/dev/null 2>&1 || true
+fi

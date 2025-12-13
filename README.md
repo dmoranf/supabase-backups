@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Status](https://img.shields.io/badge/Status-Stable-brightgreen?style=flat-square)
+![Status](https://img.shields.io/badge/Status-Development-yellow?style=flat-square)
 ![Bash](https://img.shields.io/badge/Language-Bash-4EAA25?style=flat-square&logo=gnu-bash&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL-336791?style=flat-square&logo=postgresql&logoColor=white)
 ![Supabase](https://img.shields.io/badge/Platform-Supabase-3ECF8E?style=flat-square&logo=supabase&logoColor=white)
@@ -42,11 +42,17 @@ Este repositorio implementa un sistema completo de backups para Supabase:
 
 ## 🛠 Requisitos
 
-Sistema basado en Debian/Ubuntu con las siguientes herramientas instaladas:
-
+### Debian / Ubuntu
 ```bash
 sudo apt update
-sudo apt install -y postgresql-client rclone age jq tar
+sudo apt install -y postgresql-client rclone age tar
+```
+
+### macOS
+```bash
+brew install libpq rclone age gnu-tar
+# Nota: macOS usa bsdtar por defecto. gnu-tar es recomendado para compatibilidad total con scripts Linux.
+# libpq incluye pg_dump
 ```
 
 ## 📂 Estructura del Proyecto
@@ -85,28 +91,27 @@ supabase-backups/
 
 ### 1. Configuración Global (`config/global.env`)
 
-Define la infraestructura común.
+Copia la plantilla y edítala con tus rutas base:
 
 ```bash
-export BASE_DIR="/root/supabase-backups"
-export LOCAL_RETENTION_DAYS=7
-export AGE_PUBLIC_KEY_FILE="${BASE_DIR}/config/backup.pub"
-export ALERT_TELEGRAM_ENABLED=false
+cp config/global.env.example config/global.env
+nano config/global.env
 ```
 
-### 2. Configuración por Proyecto (`config/projects/demo.env`)
+### 2. Configuración por Proyecto (`config/projects/`)
 
-Configuración específica para conectar a Supabase DB y S3.
+Crea un archivo por cada proyecto basado en la plantilla:
+
+```bash
+cp config/projects/project.env.example config/projects/mi-proyecto.env
+nano config/projects/mi-proyecto.env
+```
+
+Configuración pura. Define solo credenciales e identificadores.
 
 ```bash
 export PROJECT_NAME="Demo"
-export PGHOST="db.xxxxx.supabase.co"
-export PGPASSWORD="SUPER_SECRET"
-
-# Storage S3
-export AWS_ACCESS_KEY_ID="clave_id"
-export AWS_SECRET_ACCESS_KEY="clave_secreta"
-export RCLONE_S3_ENDPOINT="https://<project-ref>.storage.supabase.co"
+# ... (ver plantilla)
 ```
 
 ### 3. Cifrado (`age`)
@@ -138,9 +143,12 @@ acl = private
 
 | Acción | Comando |
 |--------|---------|
-| **Backup DB (Todos)** | `bin/run-all.sh` |
+| **Backup DB (Todos)** | `bin/run-all.sh --db` |
+| **Backup Storage (Inc.)** | `bin/run-all.sh --storage --incremental` |
+| **Backup Storage (Full)** | `bin/run-all.sh --storage --full` |
+| **Backup Todo (Todos)** | `bin/run-all.sh --all` |
 | **Backup DB (Uno)** | `export SUPABASE_BACKUP_ENV=config/projects/demo.env && bin/backup-db.sh` |
-| **Backup Storage** | `export SUPABASE_BACKUP_ENV=config/projects/demo.env && bin/backup-storage.sh` |
+| **Backup Storage (Uno)** | `export SUPABASE_BACKUP_ENV=config/projects/demo.env && bin/backup-storage.sh --full` |
 
 ### Automatización (Cron)
 
@@ -148,10 +156,10 @@ Ejemplos recomendados para `/etc/crontab` o `crontab -e`:
 
 ```cron
 # DB diario a las 02:00
-0 2 * * * cd /root/supabase-backups && bin/run-all.sh >> logs/cron-db.log 2>&1
+0 2 * * * cd /root/supabase-backups && bin/run-all.sh --db >> logs/cron-db.log 2>&1
 
 # Storage semanal (Domingos 03:00)
-0 3 * * 0 cd /root/supabase-backups && for f in config/projects/*.env; do export SUPABASE_BACKUP_ENV="$f"; bin/backup-storage.sh; done >> logs/cron-storage.log 2>&1
+0 3 * * 0 cd /root/supabase-backups && bin/run-all.sh --storage >> logs/cron-storage.log 2>&1
 
 # Limpieza diaria (04:30)
 30 4 * * * cd /root/supabase-backups && bin/rotate-backup.sh >> logs/cron-rotate.log 2>&1

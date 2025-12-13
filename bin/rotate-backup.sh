@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bootstrap
+# Config load
 if [ -z "${SUPABASE_BACKUP_ENV:-}" ]; then
   echo "[ERROR] SUPABASE_BACKUP_ENV no está definida"
   exit 1
 fi
 source "$SUPABASE_BACKUP_ENV"
+
+# Derived paths (Inline Logic)
+LOG_FILE="${LOG_DIR}/${PROJECT_NAME}.log"
 
 mkdir -p "$LOG_DIR"
 

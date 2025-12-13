@@ -10,6 +10,10 @@ if [ -z "${SUPABASE_BACKUP_ENV:-}" ]; then
 fi
 source "$SUPABASE_BACKUP_ENV"
 
+# Derived paths (Inline Logic)
+PROJECT_DIR="${BASE_DIR}/backups/${PROJECT_NAME}"
+LOCAL_BACKUP_DIR="${BASE_DIR}/backups/${PROJECT_NAME}"
+
 FILE="$1"
 
 if [ -z "${FILE:-}" ]; then
