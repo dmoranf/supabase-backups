@@ -13,8 +13,11 @@ source "$SUPABASE_BACKUP_ENV"
 # Derived paths (Inline Logic)
 LOCAL_BACKUP_DIR="${BASE_DIR}/backups/${PROJECT_NAME}"
 
-find "${LOCAL_BACKUP_DIR}/db" \
-  -type f \
-  -name "*.age" \
-  -mtime +"${LOCAL_RETENTION_DAYS}" \
-  -delete
+for SUBDIR in db storage; do
+  [ -d "${LOCAL_BACKUP_DIR}/${SUBDIR}" ] || continue
+  find "${LOCAL_BACKUP_DIR}/${SUBDIR}" \
+    -type f \
+    -name "*.age" \
+    -mtime +"${LOCAL_RETENTION_DAYS}" \
+    -delete
+done

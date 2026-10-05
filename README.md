@@ -181,7 +181,7 @@ Ejemplos recomendados para `/etc/crontab` o `crontab -e`:
 # Storage semanal (Domingos 03:00)
 0 3 * * 0 cd /root/supabase-backups && bin/run-all.sh --storage >> logs/cron-storage.log 2>&1
 
-# Limpieza diaria (04:30)
+# Limpieza diaria (04:30) de todos los proyectos: local (LOCAL_RETENTION_DAYS) y remoto (RETENTION_DAYS)
 30 4 * * * cd /root/supabase-backups && bin/rotate-backup.sh >> logs/cron-rotate.log 2>&1
 ```
 
